@@ -23,6 +23,7 @@ Portfolio + AI retrieval assistant + rental operations tools.
 - `/api/chat`
 - `/api/energy/reports`
 - `/api/meter-parse`
+- `/api/weather/sync`
 
 ## Local setup
 1. Install dependencies: `npm install`
@@ -40,3 +41,10 @@ Run migrations in order:
 - `/api/chat` can retrieve context from `kb_chunk`/`kb_document` when no `contextChunks` are provided by the client.
 - `/api/meter-parse` now persists readings to `meter_reading` with `pending_review` status.
 - `/api/energy/reports` reads materialized report data from `energy_weather_report`.
+- `/api/weather/sync` fetches Open-Meteo daily weather and upserts `weather_daily`, then refreshes `energy_weather_report`.
+
+## Weather Sync Usage
+- Sync one day:
+  - `GET /api/weather/sync?start=2026-02-20&end=2026-02-20`
+- Sync a range:
+  - `GET /api/weather/sync?start=2026-01-01&end=2026-02-20`
