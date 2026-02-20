@@ -133,7 +133,7 @@ create table meter_reading (
   parser_confidence numeric(5,4),
   parse_status text not null default 'pending_review' check (parse_status in ('pending_review', 'approved', 'rejected')),
   source text not null default 'upload' check (source in ('upload', 'manual')),
-  weather_day date generated always as (date(captured_at)) stored,
+  weather_day date,
   created_at timestamptz not null default now()
 );
 
