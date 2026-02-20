@@ -1,0 +1,93 @@
+:root {
+  --bg: #f5f3ef;
+  --fg: #1d1e20;
+  --muted: #6c7075;
+  --card: #ffffff;
+  --line: #d9d3c8;
+  --brand: #0f6b61;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+  background: radial-gradient(circle at 20% 20%, #fffcf5 0%, var(--bg) 45%, #ebe7df 100%);
+  color: var(--fg);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+main {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: -0.02em;
+}
+
+.grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 1rem;
+}
+
+.badge {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.1rem 0.65rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  border: 1px solid var(--line);
+  padding: 0.5rem;
+  text-align: left;
+}
+
+.btn {
+  display: inline-block;
+  padding: 0.6rem 0.9rem;
+  border-radius: 10px;
+  border: 1px solid var(--brand);
+  background: var(--brand);
+  color: #fff;
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--brand);
+}
+
+.muted {
+  color: var(--muted);
+}
