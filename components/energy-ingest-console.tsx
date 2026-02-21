@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { getAllowedUtilitiesForUnitName } from "@/lib/unit-utility-policy";
 
 type Unit = { id: string; unit_name: string; meter_type: string };
 
@@ -79,6 +80,13 @@ export default function EnergyIngestConsole() {
     () => units.find((unit) => unit.id === selectedUnitId)?.unit_name ?? "Selected Unit",
     [units, selectedUnitId]
   );
+  const allowedUtilities = useMemo(() => getAllowedUtilitiesForUnitName(selectedUnitName), [selectedUnitName]);
+
+  useEffect(() => {
+    if (!allowedUtilities.includes(utilityType as "electricity" | "gas" | "water")) {
+      setUtilityType(allowedUtilities[0]);
+    }
+  }, [allowedUtilities, utilityType]);
 
   async function onSubmitMeter(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -166,9 +174,11 @@ export default function EnergyIngestConsole() {
           <label>
             Utility
             <select value={utilityType} onChange={(event) => setUtilityType(event.target.value)} style={{ display: "block", width: "100%", marginTop: ".3rem", padding: ".5rem" }}>
-              <option value="electricity">electricity</option>
-              <option value="gas">gas</option>
-              <option value="water">water</option>
+              {allowedUtilities.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
             </select>
           </label>
           <label>
@@ -267,4 +277,3 @@ export default function EnergyIngestConsole() {
     </div>
   );
 }
-

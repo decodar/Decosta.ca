@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dbQuery } from "@/lib/db";
+import { getAllowedUtilitiesForUnitName, isUtilityAllowedForUnit } from "@/lib/unit-utility-policy";
 
 const ALLOWED_UTILITY_TYPES = new Set(["electricity", "gas", "water"]);
 const ALLOWED_ENTRY_TYPES = new Set(["meter_read", "billed_usage"]);
@@ -295,6 +296,17 @@ async function getUsageStats(unitId: string, utilityType: string) {
   };
 }
 
+async function getUnitNameById(unitId: string) {
+  const result = await dbQuery<{ unit_name: string }>(
+    `select unit_name
+     from rental_unit
+     where id = $1::uuid
+     limit 1`,
+    [unitId]
+  );
+  return result.rows[0]?.unit_name ?? null;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const contentType = request.headers.get("content-type") || "";
@@ -320,10 +332,33 @@ export async function POST(request: NextRequest) {
       if (!(file instanceof File)) {
         return NextResponse.json({ error: "PDF file is required." }, { status: 400 });
       }
+      const unitName = await getUnitNameById(unitId);
+      if (!unitName) {
+        return NextResponse.json({ error: "Unit not found." }, { status: 404 });
+      }
+      if (utilityOverride && !isUtilityAllowedForUnit(unitName, utilityOverride)) {
+        return NextResponse.json(
+          {
+            error: `Utility '${utilityOverride}' is not allowed for unit '${unitName}'.`,
+            allowedUtilities: getAllowedUtilitiesForUnitName(unitName)
+          },
+          { status: 400 }
+        );
+      }
 
       const extracted = await extractEntriesFromPdf(file, timezone, utilityOverride);
       if (extracted.length === 0) {
         return NextResponse.json({ error: "No valid entries extracted from bill." }, { status: 422 });
+      }
+      const invalid = extracted.find((entry) => !isUtilityAllowedForUnit(unitName, entry.utility_type));
+      if (invalid) {
+        return NextResponse.json(
+          {
+            error: `Extracted utility '${invalid.utility_type}' is not allowed for unit '${unitName}'.`,
+            allowedUtilities: getAllowedUtilitiesForUnitName(unitName)
+          },
+          { status: 400 }
+        );
       }
 
       const inserted = [];
@@ -356,6 +391,19 @@ export async function POST(request: NextRequest) {
     }
     if (!body.utilityType || !ALLOWED_UTILITY_TYPES.has(body.utilityType)) {
       return NextResponse.json({ error: "Invalid utilityType." }, { status: 400 });
+    }
+    const unitName = await getUnitNameById(body.unitId);
+    if (!unitName) {
+      return NextResponse.json({ error: "Unit not found." }, { status: 404 });
+    }
+    if (!isUtilityAllowedForUnit(unitName, body.utilityType)) {
+      return NextResponse.json(
+        {
+          error: `Utility '${body.utilityType}' is not allowed for unit '${unitName}'.`,
+          allowedUtilities: getAllowedUtilitiesForUnitName(unitName)
+        },
+        { status: 400 }
+      );
     }
 
     const entryType = body.entryType ?? "meter_read";
@@ -401,4 +449,3 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Ingest failed.", details: message }, { status: 500 });
   }
 }
-

@@ -76,6 +76,10 @@ Run migrations in order:
   - `POST /api/energy/ingest` (JSON, `mode="meter"`)
 - Bill PDF ingest:
   - `POST /api/energy/ingest` (multipart form-data with `mode="bill"` and `file`)
+- Unit utility policy enforced in UI/API:
+  - `Coach`: electricity only
+  - `Suite`: electricity only
+  - `House`: electricity + gas
 - Response includes inserted rows and quick stats:
   - latest interval delta
   - 30-day usage total

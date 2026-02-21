@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dbQuery } from "@/lib/db";
+import { getAllowedUtilitiesForUnitName, isUtilityAllowedForUnit } from "@/lib/unit-utility-policy";
 
 type MeterParsePayload = {
   unitId: string;
@@ -47,6 +48,26 @@ export async function POST(request: NextRequest) {
 
   if (!["electricity", "gas", "water"].includes(utilityType)) {
     return NextResponse.json({ error: "Invalid utilityType." }, { status: 400 });
+  }
+  const unitRow = await dbQuery<{ unit_name: string }>(
+    `select unit_name
+     from rental_unit
+     where id = $1::uuid
+     limit 1`,
+    [body.unitId]
+  );
+  const unitName = unitRow.rows[0]?.unit_name;
+  if (!unitName) {
+    return NextResponse.json({ error: "Unit not found." }, { status: 404 });
+  }
+  if (!isUtilityAllowedForUnit(unitName, utilityType)) {
+    return NextResponse.json(
+      {
+        error: `Utility '${utilityType}' is not allowed for unit '${unitName}'.`,
+        allowedUtilities: getAllowedUtilitiesForUnitName(unitName)
+      },
+      { status: 400 }
+    );
   }
   if (!["meter_read", "billed_usage"].includes(entryType)) {
     return NextResponse.json({ error: "Invalid entryType." }, { status: 400 });
