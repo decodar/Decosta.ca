@@ -8,16 +8,23 @@ function isUuid(value: string) {
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const unitId = searchParams.get("unitId");
+  const utilityType = searchParams.get("utilityType");
   const daysRaw = searchParams.get("days");
   const days = Math.min(Math.max(Number(daysRaw ?? "30"), 1), 366);
+  const allowedUtilityTypes = new Set(["electricity", "gas", "water"]);
 
   if (unitId && !isUuid(unitId)) {
     return NextResponse.json({ error: "Invalid unitId." }, { status: 400 });
+  }
+  if (utilityType && !allowedUtilityTypes.has(utilityType)) {
+    return NextResponse.json({ error: "Invalid utilityType." }, { status: 400 });
   }
 
   try {
     const report = await dbQuery<{
       unit_id: string;
+      utility_type: string;
+      usage_unit: string | null;
       day: string;
       consumption_delta: string | null;
       temp_avg_c: string | null;
@@ -27,6 +34,8 @@ export async function GET(request: NextRequest) {
     }>(
       `select
         unit_id::text,
+        utility_type,
+        usage_unit,
         day::text,
         consumption_delta::text,
         temp_avg_c::text,
@@ -36,8 +45,9 @@ export async function GET(request: NextRequest) {
       from energy_weather_report
       where day >= current_date - $1::int
         and ($2::uuid is null or unit_id = $2::uuid)
+        and ($3::text is null or utility_type = $3::text)
       order by day desc`,
-      [days, unitId]
+      [days, unitId, utilityType]
     );
 
     const units = await dbQuery<{ id: string; unit_name: string; meter_type: string }>(
@@ -47,7 +57,7 @@ export async function GET(request: NextRequest) {
     );
 
     return NextResponse.json({
-      filters: { unitId, days },
+      filters: { unitId, utilityType, days },
       units: units.rows,
       rows: report.rows
     });
@@ -56,4 +66,3 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Failed to fetch report data.", details: message }, { status: 500 });
   }
 }
-
