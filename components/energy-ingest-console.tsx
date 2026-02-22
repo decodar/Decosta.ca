@@ -41,6 +41,7 @@ export default function EnergyIngestConsole() {
   const [billId, setBillId] = useState("");
   const [isOpening, setIsOpening] = useState(false);
   const [billFile, setBillFile] = useState<File | null>(null);
+  const [meterImageFile, setMeterImageFile] = useState<File | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -156,6 +157,38 @@ export default function EnergyIngestConsole() {
     }
   }
 
+  async function onSubmitMeterImage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!meterImageFile) {
+      setError("Please select a meter image first.");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    setResult(null);
+    try {
+      const form = new FormData();
+      form.set("mode", "meter_image");
+      form.set("unitId", selectedUnitId);
+      form.set("timezone", "America/Vancouver");
+      form.set("file", meterImageFile);
+
+      const response = await fetch("/api/energy/ingest", {
+        method: "POST",
+        body: form
+      });
+      const json = (await response.json()) as IngestResponse & { error?: string; details?: string };
+      if (!response.ok) {
+        throw new Error(json.details || json.error || "Failed to ingest meter image.");
+      }
+      setResult(json);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unexpected error.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div className="grid" style={{ gap: "1rem" }}>
       <section className="card">
@@ -236,6 +269,20 @@ export default function EnergyIngestConsole() {
           </label>
           <button className="btn" type="submit" disabled={loading || !selectedUnitId || !billFile}>
             {loading ? "Processing..." : "Process Bill"}
+          </button>
+        </form>
+      </section>
+
+      <section className="card">
+        <h2>Upload Meter Photo (AI Read + Insert)</h2>
+        <form className="grid" onSubmit={onSubmitMeterImage}>
+          <p className="muted">AI reads the meter identifier and kWh from the image, maps it to a unit, inserts the reading, and returns updated usage stats.</p>
+          <label>
+            Meter Image
+            <input type="file" accept="image/*" onChange={(event) => setMeterImageFile(event.target.files?.[0] ?? null)} style={{ display: "block", marginTop: ".3rem" }} />
+          </label>
+          <button className="btn" type="submit" disabled={loading || !selectedUnitId || !meterImageFile}>
+            {loading ? "Reading..." : "Process Meter Photo"}
           </button>
         </form>
       </section>

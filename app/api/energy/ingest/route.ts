@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dbQuery } from "@/lib/db";
 import { getAllowedUtilitiesForUnitName, isUtilityAllowedForUnit } from "@/lib/unit-utility-policy";
+import { lookupMeterIdentifier, normalizeMeterIdentifier } from "@/lib/meter-identifier-map";
 
 const ALLOWED_UTILITY_TYPES = new Set(["electricity", "gas", "water"]);
 const ALLOWED_ENTRY_TYPES = new Set(["meter_read", "billed_usage"]);
@@ -29,6 +30,15 @@ type ExtractedEntry = {
   period_end: string | null;
   is_opening: boolean | null;
   bill_id: string | null;
+  confidence: number;
+  evidence: string;
+};
+
+type ExtractedMeterImage = {
+  meter_identifier: string;
+  reading_value: number;
+  reading_unit: string | null;
+  captured_at: string | null;
   confidence: number;
   evidence: string;
 };
@@ -173,6 +183,84 @@ async function extractEntriesFromPdf(file: File, timezone: string, utilityOverri
     );
 }
 
+async function extractMeterFromImage(file: File, timezone: string) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("Missing OPENAI_API_KEY.");
+  }
+
+  const mimeType = file.type || "image/jpeg";
+  const bytes = Buffer.from(await file.arrayBuffer()).toString("base64");
+  const filename = file.name || "meter.jpg";
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: "gpt-4.1",
+      text: {
+        format: {
+          type: "json_schema",
+          name: "meter_image_reading",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              meter_identifier: { type: "string" },
+              reading_value: { type: "number" },
+              reading_unit: { type: ["string", "null"] },
+              captured_at: { type: ["string", "null"] },
+              confidence: { type: "number" },
+              evidence: { type: "string" }
+            },
+            required: ["meter_identifier", "reading_value", "reading_unit", "captured_at", "confidence", "evidence"]
+          }
+        }
+      },
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text:
+                `Read this utility meter photo and return STRICT JSON only.\n` +
+                `Extract the meter identifier and the cumulative reading value shown.\n` +
+                `If the image shows kWh, return reading_unit='kWh'. If unclear, return null.\n` +
+                `If no timestamp/date is visible, return captured_at=null.\n` +
+                `Use timezone ${timezone} if a date/time is visible.\n`
+            },
+            {
+              type: "input_image",
+              image_url: `data:${mimeType};base64,${bytes}`
+            }
+          ]
+        }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenAI meter image extraction failed: ${await response.text()}`);
+  }
+
+  const payload = await response.json();
+  const text = getOutputText(payload);
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end < start) {
+    throw new Error("Could not parse meter image extraction response.");
+  }
+  const parsed = JSON.parse(text.slice(start, end + 1)) as ExtractedMeterImage;
+  if (!parsed.meter_identifier || !Number.isFinite(parsed.reading_value)) {
+    throw new Error("Meter image extraction missing identifier or reading.");
+  }
+  return parsed;
+}
+
 async function insertEntry(unitId: string, entry: ExtractedEntry, imageRef: string) {
   return dbQuery<{
     id: string;
@@ -307,6 +395,17 @@ async function getUnitNameById(unitId: string) {
   return result.rows[0]?.unit_name ?? null;
 }
 
+async function getUnitIdByName(unitName: string) {
+  const result = await dbQuery<{ id: string }>(
+    `select id::text as id
+     from rental_unit
+     where lower(unit_name) = lower($1)
+     limit 1`,
+    [unitName]
+  );
+  return result.rows[0]?.id ?? null;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const contentType = request.headers.get("content-type") || "";
@@ -314,23 +413,75 @@ export async function POST(request: NextRequest) {
     if (contentType.includes("multipart/form-data")) {
       const form = await request.formData();
       const mode = String(form.get("mode") || "bill");
-      if (mode !== "bill") {
+      if (mode !== "bill" && mode !== "meter_image") {
         return NextResponse.json({ error: "Unsupported multipart mode." }, { status: 400 });
       }
 
-      const unitId = String(form.get("unitId") || "");
-      const utilityOverride = String(form.get("utilityType") || "").trim() || null;
       const timezone = String(form.get("timezone") || "America/Vancouver");
       const file = form.get("file");
+      const utilityOverride = String(form.get("utilityType") || "").trim() || null;
+      let unitId = String(form.get("unitId") || "");
 
-      if (!unitId || !isUuid(unitId)) {
-        return NextResponse.json({ error: "Valid unitId is required." }, { status: 400 });
-      }
       if (utilityOverride && !ALLOWED_UTILITY_TYPES.has(utilityOverride)) {
         return NextResponse.json({ error: "Invalid utilityType." }, { status: 400 });
       }
       if (!(file instanceof File)) {
-        return NextResponse.json({ error: "PDF file is required." }, { status: 400 });
+        return NextResponse.json({ error: "Upload file is required." }, { status: 400 });
+      }
+      if (mode === "meter_image") {
+        const extracted = await extractMeterFromImage(file, timezone);
+        const mapping = lookupMeterIdentifier(extracted.meter_identifier);
+        if (!mapping) {
+          return NextResponse.json(
+            {
+              error: `Unknown meter identifier '${normalizeMeterIdentifier(extracted.meter_identifier)}'. Add a mapping before ingest.`,
+              extracted
+            },
+            { status: 422 }
+          );
+        }
+        const mappedUnitId = await getUnitIdByName(mapping.unitName);
+        if (!mappedUnitId) {
+          return NextResponse.json({ error: `Mapped unit '${mapping.unitName}' not found in rental_unit.` }, { status: 404 });
+        }
+        if (unitId && (!isUuid(unitId) || unitId !== mappedUnitId)) {
+          return NextResponse.json(
+            {
+              error: `Meter identifier maps to '${mapping.unitName}', but selected unit does not match.`,
+              mappedUnitName: mapping.unitName
+            },
+            { status: 400 }
+          );
+        }
+        unitId = mappedUnitId;
+        const entry: ExtractedEntry = {
+          entry_type: "meter_read",
+          utility_type: mapping.utilityType,
+          captured_at: extracted.captured_at || new Date().toISOString(),
+          reading_value: Number(extracted.reading_value),
+          reading_unit: extracted.reading_unit || mapping.readingUnitDefault,
+          period_start: null,
+          period_end: null,
+          bill_id: `meter-image-${normalizeMeterIdentifier(extracted.meter_identifier)}`,
+          is_opening: null,
+          confidence: extracted.confidence,
+          evidence: extracted.evidence
+        };
+        const inserted = await insertEntry(unitId, entry, `meter-image:${file.name}`);
+        await dbQuery("refresh materialized view energy_weather_report");
+        const stats = await getUsageStats(unitId, mapping.utilityType);
+        return NextResponse.json({
+          mode: "meter",
+          meterIdentifier: extracted.meter_identifier,
+          mappedMeter: mapping,
+          insertedCount: 1,
+          inserted: inserted.rows,
+          statsByUtility: { [mapping.utilityType]: stats }
+        });
+      }
+
+      if (!unitId || !isUuid(unitId)) {
+        return NextResponse.json({ error: "Valid unitId is required." }, { status: 400 });
       }
       const unitName = await getUnitNameById(unitId);
       if (!unitName) {
