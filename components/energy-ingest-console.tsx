@@ -279,7 +279,7 @@ export default function EnergyIngestConsole() {
           <p className="muted">AI reads the meter identifier and kWh from the image, maps it to a unit, inserts the reading, and returns updated usage stats.</p>
           <label>
             Meter Image
-            <input type="file" accept="image/*" onChange={(event) => setMeterImageFile(event.target.files?.[0] ?? null)} style={{ display: "block", marginTop: ".3rem" }} />
+            <input type="file" accept="image/*,.heic,.heif" onChange={(event) => setMeterImageFile(event.target.files?.[0] ?? null)} style={{ display: "block", marginTop: ".3rem" }} />
           </label>
           <button className="btn" type="submit" disabled={loading || !selectedUnitId || !meterImageFile}>
             {loading ? "Reading..." : "Process Meter Photo"}

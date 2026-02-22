@@ -189,9 +189,34 @@ async function extractMeterFromImage(file: File, timezone: string) {
     throw new Error("Missing OPENAI_API_KEY.");
   }
 
-  const mimeType = file.type || "image/jpeg";
-  const bytes = Buffer.from(await file.arrayBuffer()).toString("base64");
+  let mimeType = file.type || "image/jpeg";
+  let rawBuffer = Buffer.from(await file.arrayBuffer());
   const filename = file.name || "meter.jpg";
+  const lowerName = filename.toLowerCase();
+
+  const isHeic =
+    mimeType.includes("heic") ||
+    mimeType.includes("heif") ||
+    lowerName.endsWith(".heic") ||
+    lowerName.endsWith(".heif");
+
+  if (isHeic) {
+    try {
+      const { default: heicConvert } = await import("heic-convert");
+      const converted = await heicConvert({
+        buffer: rawBuffer,
+        format: "JPEG",
+        quality: 0.9
+      });
+      rawBuffer = Buffer.from(converted);
+      mimeType = "image/jpeg";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "HEIC conversion failed";
+      throw new Error(`Failed to convert HEIC image: ${message}`);
+    }
+  }
+
+  const bytes = rawBuffer.toString("base64");
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -231,7 +256,8 @@ async function extractMeterFromImage(file: File, timezone: string) {
                 `Extract the meter identifier and the cumulative reading value shown.\n` +
                 `If the image shows kWh, return reading_unit='kWh'. If unclear, return null.\n` +
                 `If no timestamp/date is visible, return captured_at=null.\n` +
-                `Use timezone ${timezone} if a date/time is visible.\n`
+                `Use timezone ${timezone} if a date/time is visible.\n` +
+                `The uploaded image may be converted from HEIC to JPEG before processing.\n`
             },
             {
               type: "input_image",
