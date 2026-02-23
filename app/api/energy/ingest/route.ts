@@ -208,7 +208,15 @@ async function extractMeterFromImage(file: File, timezone: string) {
         format: "JPEG",
         quality: 0.9
       });
-      rawBuffer = Buffer.from(converted);
+      if (Buffer.isBuffer(converted)) {
+        rawBuffer = converted;
+      } else if (converted instanceof Uint8Array) {
+        rawBuffer = Buffer.from(converted);
+      } else if (converted instanceof ArrayBuffer) {
+        rawBuffer = Buffer.from(new Uint8Array(converted));
+      } else {
+        throw new Error("Unsupported HEIC conversion output type");
+      }
       mimeType = "image/jpeg";
     } catch (error) {
       const message = error instanceof Error ? error.message : "HEIC conversion failed";
