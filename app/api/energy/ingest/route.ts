@@ -454,6 +454,7 @@ export async function POST(request: NextRequest) {
       const timezone = String(form.get("timezone") || "America/Vancouver");
       const file = form.get("file");
       const utilityOverride = String(form.get("utilityType") || "").trim() || null;
+      const manualUnitOverride = String(form.get("manualUnitOverride") || "").toLowerCase() === "true";
       let unitId = String(form.get("unitId") || "");
 
       if (utilityOverride && !ALLOWED_UTILITY_TYPES.has(utilityOverride)) {
@@ -464,30 +465,50 @@ export async function POST(request: NextRequest) {
       }
       if (mode === "meter_image") {
         const extracted = await extractMeterFromImage(file, timezone);
-        const mapping = lookupMeterIdentifier(extracted.meter_identifier);
-        if (!mapping) {
-          return NextResponse.json(
-            {
-              error: `Unknown meter identifier '${normalizeMeterIdentifier(extracted.meter_identifier)}'. Add a mapping before ingest.`,
-              extracted
-            },
-            { status: 422 }
-          );
+        let mapping = lookupMeterIdentifier(extracted.meter_identifier);
+        let mappedBy = "identifier";
+
+        if (manualUnitOverride) {
+          if (!unitId || !isUuid(unitId)) {
+            return NextResponse.json({ error: "Valid selected unit is required for manual unit override." }, { status: 400 });
+          }
+          const selectedUnitName = await getUnitNameById(unitId);
+          if (!selectedUnitName) {
+            return NextResponse.json({ error: "Selected unit not found." }, { status: 404 });
+          }
+          mapping = {
+            unitName: selectedUnitName,
+            utilityType: "electricity",
+            readingUnitDefault: "kWh",
+            label: `${selectedUnitName} manual meter photo override`
+          };
+          mappedBy = "manual_unit_override";
+        } else {
+          if (!mapping) {
+            return NextResponse.json(
+              {
+                error: `Unknown meter identifier '${normalizeMeterIdentifier(extracted.meter_identifier)}'. Add a mapping before ingest or use manual unit override.`,
+                extracted
+              },
+              { status: 422 }
+            );
+          }
+          const mappedUnitId = await getUnitIdByName(mapping.unitName);
+          if (!mappedUnitId) {
+            return NextResponse.json({ error: `Mapped unit '${mapping.unitName}' not found in rental_unit.` }, { status: 404 });
+          }
+          if (unitId && (!isUuid(unitId) || unitId !== mappedUnitId)) {
+            return NextResponse.json(
+              {
+                error: `Meter identifier maps to '${mapping.unitName}', but selected unit does not match.`,
+                mappedUnitName: mapping.unitName
+              },
+              { status: 400 }
+            );
+          }
+          unitId = mappedUnitId;
         }
-        const mappedUnitId = await getUnitIdByName(mapping.unitName);
-        if (!mappedUnitId) {
-          return NextResponse.json({ error: `Mapped unit '${mapping.unitName}' not found in rental_unit.` }, { status: 404 });
-        }
-        if (unitId && (!isUuid(unitId) || unitId !== mappedUnitId)) {
-          return NextResponse.json(
-            {
-              error: `Meter identifier maps to '${mapping.unitName}', but selected unit does not match.`,
-              mappedUnitName: mapping.unitName
-            },
-            { status: 400 }
-          );
-        }
-        unitId = mappedUnitId;
+
         const entry: ExtractedEntry = {
           entry_type: "meter_read",
           utility_type: mapping.utilityType,
@@ -507,6 +528,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({
           mode: "meter",
           meterIdentifier: extracted.meter_identifier,
+          mappedBy,
           mappedMeter: mapping,
           insertedCount: 1,
           inserted: inserted.rows,

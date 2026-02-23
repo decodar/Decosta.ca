@@ -42,6 +42,7 @@ export default function EnergyIngestConsole() {
   const [isOpening, setIsOpening] = useState(false);
   const [billFile, setBillFile] = useState<File | null>(null);
   const [meterImageFile, setMeterImageFile] = useState<File | null>(null);
+  const [useManualMeterUnitOverride, setUseManualMeterUnitOverride] = useState(false);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -171,6 +172,9 @@ export default function EnergyIngestConsole() {
       form.set("mode", "meter_image");
       form.set("unitId", selectedUnitId);
       form.set("timezone", "America/Vancouver");
+      if (useManualMeterUnitOverride) {
+        form.set("manualUnitOverride", "true");
+      }
       form.set("file", meterImageFile);
 
       const response = await fetch("/api/energy/ingest", {
@@ -276,7 +280,15 @@ export default function EnergyIngestConsole() {
       <section className="card">
         <h2>Upload Meter Photo (AI Read + Insert)</h2>
         <form className="grid" onSubmit={onSubmitMeterImage}>
-          <p className="muted">AI reads the meter identifier and kWh from the image, maps it to a unit, inserts the reading, and returns updated usage stats.</p>
+          <p className="muted">AI reads the meter identifier and kWh from the image, maps it to a unit, inserts the reading, and returns updated usage stats. If it picks the wrong identifier, enable manual unit override and use the selected unit.</p>
+          <label style={{ display: "flex", alignItems: "center", gap: ".4rem" }}>
+            <input
+              type="checkbox"
+              checked={useManualMeterUnitOverride}
+              onChange={(event) => setUseManualMeterUnitOverride(event.target.checked)}
+            />
+            Use selected unit instead of AI meter identifier mapping
+          </label>
           <label>
             Meter Image
             <input type="file" accept="image/*,.heic,.heif" onChange={(event) => setMeterImageFile(event.target.files?.[0] ?? null)} style={{ display: "block", marginTop: ".3rem" }} />
