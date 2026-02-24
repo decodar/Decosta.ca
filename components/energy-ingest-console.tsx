@@ -27,6 +27,23 @@ type IngestResponse = {
   >;
 };
 
+type UnitSummaryResponse = {
+  unit: { id: string; unit_name: string };
+  rows: Array<{
+    utilityType: "electricity" | "gas";
+    dailyConsumption: number | null;
+    dailyUnit: string | null;
+    lastMonthBilledAmount: number | null;
+    lastMonthBilledAmountCurrency: "CAD";
+    currentMeterRead: number | null;
+    currentMeterReadUnit: string | null;
+    currentMeterReadAt: string | null;
+    lastMonthEndMeterRead: number | null;
+    lastMonthEndMeterReadUnit: string | null;
+    lastMonthEndMeterReadAt: string | null;
+  }>;
+};
+
 function getCurrentLocalDateTimeInputValue() {
   const now = new Date();
   return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -52,6 +69,7 @@ export default function EnergyIngestConsole() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<IngestResponse | null>(null);
+  const [summary, setSummary] = useState<UnitSummaryResponse | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -98,6 +116,16 @@ export default function EnergyIngestConsole() {
     }
   }, [allowedUtilities, utilityType]);
 
+  async function refreshSummary(unitId: string) {
+    if (!unitId) return;
+    const response = await fetch(`/api/energy/summary?unitId=${encodeURIComponent(unitId)}`);
+    const json = (await response.json()) as UnitSummaryResponse & { error?: string };
+    if (!response.ok) {
+      throw new Error(json.error || "Failed to load summary.");
+    }
+    setSummary(json);
+  }
+
   async function onSubmitMeter(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -127,6 +155,7 @@ export default function EnergyIngestConsole() {
       }
       setResult(json);
       setCapturedAt(getCurrentLocalDateTimeInputValue());
+      await refreshSummary(selectedUnitId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unexpected error.");
     } finally {
@@ -160,6 +189,7 @@ export default function EnergyIngestConsole() {
         throw new Error(json.details || json.error || "Failed to ingest bill.");
       }
       setResult(json);
+      await refreshSummary(selectedUnitId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unexpected error.");
     } finally {
@@ -195,6 +225,7 @@ export default function EnergyIngestConsole() {
         throw new Error(json.details || json.error || "Failed to ingest meter image.");
       }
       setResult(json);
+      await refreshSummary(selectedUnitId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unexpected error.");
     } finally {
@@ -352,6 +383,39 @@ export default function EnergyIngestConsole() {
               </p>
             </div>
           ))}
+        </section>
+      )}
+
+      {summary && (
+        <section className="card">
+          <h2>Unit Summary</h2>
+          <p className="muted">Current meter reads and daily consumption estimates for {summary.unit.unit_name}. Last month billed amount is shown when bill totals are stored.</p>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Utility</th>
+                <th>Daily Consumption</th>
+                <th>Last Month Billed Amount</th>
+                <th>Current Meter Read</th>
+                <th>Current Read Time</th>
+                <th>Last Month-End Read</th>
+                <th>Month-End Read Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summary.rows.map((row) => (
+                <tr key={row.utilityType}>
+                  <td>{row.utilityType}</td>
+                  <td>{row.dailyConsumption !== null ? `${row.dailyConsumption} ${row.dailyUnit ?? ""}` : "N/A"}</td>
+                  <td>{row.lastMonthBilledAmount !== null ? `${row.lastMonthBilledAmountCurrency} $${row.lastMonthBilledAmount.toFixed(2)}` : "Not stored"}</td>
+                  <td>{row.currentMeterRead !== null ? `${row.currentMeterRead} ${row.currentMeterReadUnit ?? ""}` : "N/A"}</td>
+                  <td>{row.currentMeterReadAt ? new Date(row.currentMeterReadAt).toLocaleString() : "N/A"}</td>
+                  <td>{row.lastMonthEndMeterRead !== null ? `${row.lastMonthEndMeterRead} ${row.lastMonthEndMeterReadUnit ?? ""}` : "N/A"}</td>
+                  <td>{row.lastMonthEndMeterReadAt ? new Date(row.lastMonthEndMeterReadAt).toLocaleString() : "N/A"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </section>
       )}
     </div>

@@ -23,6 +23,7 @@ Portfolio + AI retrieval assistant + rental operations tools.
 - `/api/chat`
 - `/api/energy/ingest`
 - `/api/energy/reports`
+- `/api/energy/summary`
 - `/api/meter-parse`
 - `/api/weather/sync`
 
@@ -84,6 +85,11 @@ Run migrations in order:
   - latest interval delta
   - 30-day usage total
   - usage since last billed period
+- UI also fetches `/api/energy/summary` after successful submissions to show:
+  - daily consumption (electricity/gas)
+  - current meter read
+  - last month-end meter read
+  - last month billed amount (placeholder until bill totals are stored)
 
 ## Billed Usage API Example
 - `POST /api/meter-parse` for natural gas bill totals (no image required):
