@@ -65,16 +65,27 @@ export default function EnergyIngestConsole() {
     })();
   }, []);
 
-  useEffect(() => {
-    if (utilityType === "gas" && readingUnit === "kWh") {
-      setReadingUnit("m3");
-    }
-    if (utilityType === "electricity" && readingUnit === "m3") {
-      setReadingUnit("kWh");
-    }
-  }, [utilityType, readingUnit]);
-
   const hasPeriod = entryType === "billed_usage";
+  const isMeterReadEntry = entryType === "meter_read";
+
+  useEffect(() => {
+    if (isMeterReadEntry) {
+      if (utilityType === "electricity") {
+        setReadingUnit("kWh");
+        return;
+      }
+      if (utilityType === "gas" || utilityType === "water") {
+        setReadingUnit("m3");
+        return;
+      }
+      return;
+    }
+
+    // Billed usage entries (especially gas) often use energy units like GJ.
+    if (utilityType === "gas" && readingUnit === "m3") {
+      setReadingUnit("GJ");
+    }
+  }, [utilityType, isMeterReadEntry, readingUnit]);
   const selectedUnitName = useMemo(
     () => units.find((unit) => unit.id === selectedUnitId)?.unit_name ?? "Selected Unit",
     [units, selectedUnitId]
@@ -233,7 +244,19 @@ export default function EnergyIngestConsole() {
           </label>
           <label>
             Unit
-            <input value={readingUnit} onChange={(event) => setReadingUnit(event.target.value)} placeholder="kWh | m3 | GJ" style={{ display: "block", width: "100%", marginTop: ".3rem", padding: ".5rem" }} />
+            <input
+              value={readingUnit}
+              onChange={(event) => setReadingUnit(event.target.value)}
+              placeholder="kWh | m3 | GJ"
+              disabled={isMeterReadEntry}
+              style={{
+                display: "block",
+                width: "100%",
+                marginTop: ".3rem",
+                padding: ".5rem",
+                background: isMeterReadEntry ? "#f3f1ed" : undefined
+              }}
+            />
           </label>
           {hasPeriod && (
             <>
