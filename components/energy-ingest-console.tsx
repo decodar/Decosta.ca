@@ -259,6 +259,28 @@ export default function EnergyIngestConsole() {
             {loading ? "Submitting..." : "Add Entry"}
           </button>
         </form>
+
+        <div style={{ borderTop: "1px solid var(--line)", marginTop: "1rem", paddingTop: "1rem" }}>
+          <h3 style={{ marginTop: 0 }}>Or Upload Meter Photo (AI Read + Insert)</h3>
+          <form className="grid" onSubmit={onSubmitMeterImage}>
+            <p className="muted">AI reads the meter identifier and kWh from the image, maps it to a unit, inserts the reading, and returns updated usage stats. If it picks the wrong identifier, enable manual unit override and use the selected unit.</p>
+            <label style={{ display: "flex", alignItems: "center", gap: ".4rem" }}>
+              <input
+                type="checkbox"
+                checked={useManualMeterUnitOverride}
+                onChange={(event) => setUseManualMeterUnitOverride(event.target.checked)}
+              />
+              Use selected unit instead of AI meter identifier mapping
+            </label>
+            <label>
+              Meter Image
+              <input type="file" accept="image/*,.heic,.heif" onChange={(event) => setMeterImageFile(event.target.files?.[0] ?? null)} style={{ display: "block", marginTop: ".3rem" }} />
+            </label>
+            <button className="btn" type="submit" disabled={loading || !selectedUnitId || !meterImageFile}>
+              {loading ? "Reading..." : "Process Meter Photo"}
+            </button>
+          </form>
+        </div>
       </section>
 
       <section className="card">
@@ -271,28 +293,6 @@ export default function EnergyIngestConsole() {
           </label>
           <button className="btn" type="submit" disabled={loading || !selectedUnitId || !billFile}>
             {loading ? "Processing..." : "Process Bill"}
-          </button>
-        </form>
-      </section>
-
-      <section className="card">
-        <h2>Upload Meter Photo (AI Read + Insert)</h2>
-        <form className="grid" onSubmit={onSubmitMeterImage}>
-          <p className="muted">AI reads the meter identifier and kWh from the image, maps it to a unit, inserts the reading, and returns updated usage stats. If it picks the wrong identifier, enable manual unit override and use the selected unit.</p>
-          <label style={{ display: "flex", alignItems: "center", gap: ".4rem" }}>
-            <input
-              type="checkbox"
-              checked={useManualMeterUnitOverride}
-              onChange={(event) => setUseManualMeterUnitOverride(event.target.checked)}
-            />
-            Use selected unit instead of AI meter identifier mapping
-          </label>
-          <label>
-            Meter Image
-            <input type="file" accept="image/*,.heic,.heif" onChange={(event) => setMeterImageFile(event.target.files?.[0] ?? null)} style={{ display: "block", marginTop: ".3rem" }} />
-          </label>
-          <button className="btn" type="submit" disabled={loading || !selectedUnitId || !meterImageFile}>
-            {loading ? "Reading..." : "Process Meter Photo"}
           </button>
         </form>
       </section>
