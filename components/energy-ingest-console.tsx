@@ -27,6 +27,11 @@ type IngestResponse = {
   >;
 };
 
+function getCurrentLocalDateTimeInputValue() {
+  const now = new Date();
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
 export default function EnergyIngestConsole() {
   const [units, setUnits] = useState<Unit[]>([]);
   const [selectedUnitId, setSelectedUnitId] = useState("");
@@ -34,7 +39,7 @@ export default function EnergyIngestConsole() {
 
   const [readingValue, setReadingValue] = useState("");
   const [readingUnit, setReadingUnit] = useState("kWh");
-  const [capturedAt, setCapturedAt] = useState("");
+  const [capturedAt, setCapturedAt] = useState(getCurrentLocalDateTimeInputValue);
   const [entryType, setEntryType] = useState("meter_read");
   const [periodStart, setPeriodStart] = useState("");
   const [periodEnd, setPeriodEnd] = useState("");
@@ -59,14 +64,6 @@ export default function EnergyIngestConsole() {
       }
     })();
   }, []);
-
-  useEffect(() => {
-    if (!capturedAt) {
-      const now = new Date();
-      const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-      setCapturedAt(local);
-    }
-  }, [capturedAt]);
 
   useEffect(() => {
     if (utilityType === "gas" && readingUnit === "kWh") {
@@ -118,6 +115,7 @@ export default function EnergyIngestConsole() {
         throw new Error(json.details || json.error || "Failed to ingest meter reading.");
       }
       setResult(json);
+      setCapturedAt(getCurrentLocalDateTimeInputValue());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unexpected error.");
     } finally {
