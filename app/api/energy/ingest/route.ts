@@ -43,8 +43,44 @@ type ExtractedMeterImage = {
   evidence: string;
 };
 
+type MeterImageNormalizationResult = {
+  readingValue: number;
+  correctionNote: string | null;
+  flagged: boolean;
+};
+
 function isUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function round3(value: number) {
+  return Number(value.toFixed(3));
+}
+
+function getMaxReasonableDailyUsage(utilityType: string) {
+  switch (utilityType) {
+    case "electricity":
+      return 250; // kWh/day ceiling for these units, intentionally high
+    case "gas":
+      return 80; // m3/day ceiling
+    case "water":
+      return 20;
+    default:
+      return 250;
+  }
+}
+
+function getRollingWindowSize(utilityType: string) {
+  switch (utilityType) {
+    case "electricity":
+      return 12;
+    case "gas":
+      return 18;
+    case "water":
+      return 12;
+    default:
+      return 12;
+  }
 }
 
 function getOutputText(payload: unknown) {
@@ -331,6 +367,145 @@ async function insertEntry(unitId: string, entry: ExtractedEntry, imageRef: stri
   );
 }
 
+async function getRecentMeterReads(unitId: string, utilityType: string, limit = 4) {
+  return dbQuery<{
+    captured_at: string;
+    reading_value: string;
+    reading_unit: string;
+  }>(
+    `select captured_at::text, reading_value::text, reading_unit
+     from meter_reading
+     where unit_id = $1
+       and utility_type = $2
+       and coalesce(entry_type, 'meter_read') = 'meter_read'
+       and parse_status = 'approved'
+     order by captured_at desc
+     limit $3`,
+    [unitId, utilityType, limit]
+  );
+}
+
+function buildMeterReadVariants(raw: number) {
+  const variants = new Set<number>();
+  if (Number.isFinite(raw)) {
+    variants.add(raw);
+  }
+  const rounded = Math.round(raw);
+  const rawStr = String(rounded);
+  if (Number.isInteger(raw) && rawStr.length >= 4) {
+    const strip1 = Number(rawStr.slice(0, -1));
+    if (Number.isFinite(strip1)) {
+      variants.add(strip1);
+    }
+    if (rawStr.length >= 5) {
+      const strip2 = Number(rawStr.slice(0, -2));
+      if (Number.isFinite(strip2)) {
+        variants.add(strip2);
+      }
+    }
+  }
+  return Array.from(variants);
+}
+
+async function normalizeMeterImageReadingValue(
+  unitId: string,
+  utilityType: string,
+  capturedAtIso: string,
+  rawValue: number
+): Promise<MeterImageNormalizationResult> {
+  const recent = await getRecentMeterReads(unitId, utilityType, getRollingWindowSize(utilityType));
+  const latest = recent.rows[0];
+  if (!latest) {
+    return { readingValue: rawValue, correctionNote: null, flagged: false };
+  }
+
+  const prevValue = Number(latest.reading_value);
+  const prevAt = new Date(latest.captured_at).getTime();
+  const nextAt = new Date(capturedAtIso).getTime();
+  const elapsedDays = Math.max((nextAt - prevAt) / (1000 * 60 * 60 * 24), 1 / 24);
+  const maxReasonableDelta = getMaxReasonableDailyUsage(utilityType) * Math.max(elapsedDays, 1);
+  const rawDelta = rawValue - prevValue;
+  const historicDailyRates: number[] = [];
+  const weightedRates: Array<{ rate: number; weight: number }> = [];
+  for (let i = 0; i < recent.rows.length - 1; i += 1) {
+    const newer = recent.rows[i];
+    const older = recent.rows[i + 1];
+    const delta = Number(newer.reading_value) - Number(older.reading_value);
+    const days = Math.max(
+      (new Date(newer.captured_at).getTime() - new Date(older.captured_at).getTime()) / (1000 * 60 * 60 * 24),
+      1 / 24
+    );
+    if (!Number.isFinite(delta) || delta < 0) {
+      continue;
+    }
+    const rate = delta / days;
+    historicDailyRates.push(rate);
+    // Heavier weight to recent intervals; rolling behavior adapts to seasonality.
+    const recencyWeight = Math.max(recent.rows.length - i, 1);
+    weightedRates.push({ rate, weight: recencyWeight });
+  }
+
+  const weightedRateSum = weightedRates.reduce((sum, item) => sum + item.rate * item.weight, 0);
+  const weightSum = weightedRates.reduce((sum, item) => sum + item.weight, 0);
+  const rollingDailyExpected = weightSum > 0 ? weightedRateSum / weightSum : null;
+  const expectedDelta = rollingDailyExpected !== null ? rollingDailyExpected * elapsedDays : null;
+
+  let allowedDeltaLow = 0;
+  let allowedDeltaHigh = maxReasonableDelta;
+  if (expectedDelta !== null) {
+    // Tolerance scales with forecast and elapsed time so short intervals aren't over-rejected.
+    const tolerance = Math.max(expectedDelta * 0.75, rollingDailyExpected ?? 0, 2);
+    allowedDeltaLow = Math.max(0, expectedDelta - tolerance);
+    allowedDeltaHigh = Math.min(maxReasonableDelta, expectedDelta + tolerance);
+  }
+
+  if (rawDelta >= allowedDeltaLow && rawDelta <= allowedDeltaHigh) {
+    return { readingValue: rawValue, correctionNote: null, flagged: false };
+  }
+
+  const candidateValues = buildMeterReadVariants(rawValue)
+    .filter((candidate) => candidate >= prevValue)
+    .map((candidate) => {
+      const delta = candidate - prevValue;
+      const withinReasonable = delta >= allowedDeltaLow && delta <= allowedDeltaHigh;
+      const expectedScore = expectedDelta !== null ? Math.abs(delta - expectedDelta) : delta;
+      const digitPenalty = candidate === rawValue ? 0 : 0.01; // prefer corrected variant only when materially better
+      const score = expectedScore + digitPenalty;
+      return { candidate, delta, withinReasonable, score, expectedScore };
+    })
+    .filter((item) => item.withinReasonable || item.delta <= maxReasonableDelta)
+    .sort((a, b) => a.score - b.score);
+
+  if (candidateValues.length > 0) {
+    const best = candidateValues[0];
+    const rawCandidate = candidateValues.find((item) => item.candidate === rawValue);
+    const shouldCorrect =
+      best.candidate !== rawValue &&
+      (!rawCandidate || best.expectedScore < rawCandidate.expectedScore * 0.25 || rawDelta > maxReasonableDelta);
+    if (shouldCorrect) {
+      return {
+        readingValue: best.candidate,
+        correctionNote:
+          `Auto-corrected meter photo reading from ${round3(rawValue)} to ${round3(best.candidate)} ` +
+          `using rolling average usage forecast since the previous ${utilityType} read ` +
+          `(previous read ${round3(prevValue)}, ${round3(elapsedDays)} day interval).`,
+        flagged: false
+      };
+    }
+    return { readingValue: rawValue, correctionNote: null, flagged: false };
+  }
+
+  return {
+    readingValue: rawValue,
+    correctionNote:
+      `Parsed meter reading ${round3(rawValue)} looks implausible versus previous read ${round3(prevValue)} ` +
+      `(${round3(rawDelta)} delta over ${round3(elapsedDays)} day(s)). ` +
+      (expectedDelta !== null ? `Rolling expected delta is about ${round3(expectedDelta)}. ` : "") +
+      `Review manually.`,
+    flagged: true
+  };
+}
+
 async function getUsageStats(unitId: string, utilityType: string) {
   const meterReads = await dbQuery<{
     captured_at: string;
@@ -522,6 +697,23 @@ export async function POST(request: NextRequest) {
           confidence: extracted.confidence,
           evidence: extracted.evidence
         };
+        const normalization = await normalizeMeterImageReadingValue(
+          unitId,
+          entry.utility_type,
+          entry.captured_at,
+          entry.reading_value
+        );
+        if (normalization.flagged) {
+          return NextResponse.json(
+            {
+              error: normalization.correctionNote || "Parsed meter reading failed validation.",
+              extracted,
+              mappedMeter: mapping
+            },
+            { status: 422 }
+          );
+        }
+        entry.reading_value = normalization.readingValue;
         const inserted = await insertEntry(unitId, entry, `meter-image:${file.name}`);
         await dbQuery("refresh materialized view energy_weather_report");
         const stats = await getUsageStats(unitId, mapping.utilityType);
@@ -530,6 +722,7 @@ export async function POST(request: NextRequest) {
           meterIdentifier: extracted.meter_identifier,
           mappedBy,
           mappedMeter: mapping,
+          correctionNote: normalization.correctionNote,
           insertedCount: 1,
           inserted: inserted.rows,
           statsByUtility: { [mapping.utilityType]: stats }
