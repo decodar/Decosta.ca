@@ -27,6 +27,12 @@ type IngestResponse = {
   >;
 };
 
+type IngestErrorResponse = {
+  error?: string;
+  details?: string;
+  mappedUnitName?: string;
+};
+
 type UnitSummaryResponse = {
   unit: { id: string; unit_name: string };
   rows: Array<{
@@ -207,25 +213,46 @@ export default function EnergyIngestConsole() {
     setError("");
     setResult(null);
     try {
-      const form = new FormData();
-      form.set("mode", "meter_image");
-      form.set("unitId", selectedUnitId);
-      form.set("timezone", "America/Vancouver");
-      if (useManualMeterUnitOverride) {
-        form.set("manualUnitOverride", "true");
-      }
-      form.set("file", meterImageFile);
+      const submitMeterImage = async (unitId: string) => {
+        const form = new FormData();
+        form.set("mode", "meter_image");
+        form.set("unitId", unitId);
+        form.set("timezone", "America/Vancouver");
+        if (useManualMeterUnitOverride) {
+          form.set("manualUnitOverride", "true");
+        }
+        form.set("file", meterImageFile);
+        const response = await fetch("/api/energy/ingest", {
+          method: "POST",
+          body: form
+        });
+        const json = (await response.json()) as IngestResponse & IngestErrorResponse;
+        return { response, json };
+      };
 
-      const response = await fetch("/api/energy/ingest", {
-        method: "POST",
-        body: form
-      });
-      const json = (await response.json()) as IngestResponse & { error?: string; details?: string };
+      let activeUnitId = selectedUnitId;
+      let { response, json } = await submitMeterImage(activeUnitId);
+
+      if (!response.ok && json.error?.includes("selected unit does not match") && json.mappedUnitName) {
+        const mappedUnit = units.find((unit) => unit.unit_name === json.mappedUnitName);
+        if (mappedUnit) {
+          const confirmed = window.confirm(
+            `This meter photo appears to be for ${json.mappedUnitName}, but the selected unit is ${selectedUnitName}. Switch to ${json.mappedUnitName} and continue?`
+          );
+          if (confirmed) {
+            setSelectedUnitId(mappedUnit.id);
+            activeUnitId = mappedUnit.id;
+            ({ response, json } = await submitMeterImage(activeUnitId));
+          }
+        }
+      }
+
       if (!response.ok) {
         throw new Error(json.details || json.error || "Failed to ingest meter image.");
       }
-      setResult(json);
-      await refreshSummary(selectedUnitId);
+
+      setResult(json as IngestResponse);
+      await refreshSummary(activeUnitId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unexpected error.");
     } finally {
