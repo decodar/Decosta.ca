@@ -38,8 +38,14 @@ async function buildUtilitySummary(unitId: string, utilityType: "electricity" | 
 
   const monthBoundaries = await dbQuery<{
     last_month_end: string;
-  }>(`select (date_trunc('month', now())::date - 1)::text as last_month_end`);
+    last_month_start: string;
+  }>(
+    `select
+      (date_trunc('month', now())::date - 1)::text as last_month_end,
+      (date_trunc('month', now())::date - interval '1 month')::date::text as last_month_start`
+  );
   const lastMonthEnd = monthBoundaries.rows[0]?.last_month_end;
+  const lastMonthStart = monthBoundaries.rows[0]?.last_month_start;
 
   const lastMonthEndRead = await dbQuery<{
     captured_at: string;
@@ -75,11 +81,25 @@ async function buildUtilitySummary(unitId: string, utilityType: "electricity" | 
   const current = latestTwoReads.rows[0];
   const monthEndRead = lastMonthEndRead.rows[0];
 
+  const lastMonthCharge = await dbQuery<{ total_charges_cad: string }>(
+    `select total_charges_cad::text
+     from utility_bill_charge
+     where unit_id = $1::uuid
+       and utility_type = $2
+       and (
+         (period_end is not null and period_end between $3::date and $4::date)
+         or (period_end is null and period_start is not null and period_start between $3::date and $4::date)
+       )
+     order by coalesce(period_end, period_start) desc, created_at desc
+     limit 1`,
+    [unitId, utilityType, lastMonthStart, lastMonthEnd]
+  );
+
   return {
     utilityType,
     dailyConsumption,
     dailyUnit,
-    lastMonthBilledAmount: null,
+    lastMonthBilledAmount: lastMonthCharge.rows[0] ? Number(lastMonthCharge.rows[0].total_charges_cad) : null,
     lastMonthBilledAmountCurrency: "CAD",
     currentMeterRead: current ? Number(current.reading_value) : null,
     currentMeterReadUnit: current?.reading_unit ?? null,
@@ -117,4 +137,3 @@ export async function GET(request: NextRequest) {
     rows
   });
 }
-

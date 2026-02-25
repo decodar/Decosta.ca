@@ -34,6 +34,16 @@ type ExtractedEntry = {
   evidence: string;
 };
 
+type ExtractedBillCharge = {
+  utility_type: "electricity" | "gas" | "water";
+  bill_id: string | null;
+  period_start: string | null;
+  period_end: string | null;
+  total_charges_cad: number;
+  confidence: number;
+  evidence: string;
+};
+
 type ExtractedMeterImage = {
   meter_identifier: string;
   meter_identifier_candidates: string[];
@@ -344,10 +354,12 @@ async function extractEntriesFromPdf(file: File, timezone: string, utilityOverri
   const prompt = [
     "Extract utility entries from this bill PDF and return STRICT JSON only.",
     "Schema:",
-    '{"entries":[{"entry_type":"meter_read|billed_usage","utility_type":"electricity|gas|water","captured_at":"ISO8601","reading_value":number,"reading_unit":"kWh|m3|GJ|...","period_start":"YYYY-MM-DD|null","period_end":"YYYY-MM-DD|null","is_opening":true|false|null,"bill_id":"string|null","confidence":number,"evidence":"short source text"}]}',
+    '{"entries":[{"entry_type":"meter_read|billed_usage","utility_type":"electricity|gas|water","captured_at":"ISO8601","reading_value":number,"reading_unit":"kWh|m3|GJ|...","period_start":"YYYY-MM-DD|null","period_end":"YYYY-MM-DD|null","is_opening":true|false|null,"bill_id":"string|null","confidence":number,"evidence":"short source text"}],"bill_charges":[{"utility_type":"electricity|gas|water","bill_id":"string|null","period_start":"YYYY-MM-DD|null","period_end":"YYYY-MM-DD|null","total_charges_cad":number,"confidence":number,"evidence":"short source text"}]}',
     `Timezone for dates/times: ${timezone}.`,
     utilityOverride ? `Force utility_type to ${utilityOverride} when ambiguous.` : "",
-    "Include both opening/closing meter reads and billed period usage totals when present."
+    "Include both opening/closing meter reads and billed period usage totals when present.",
+    "Also extract total utility charges in CAD for each utility shown (e.g. 'Total gas charges' or 'Total electricity charges').",
+    "Do not use the full 'Pay' amount if it includes prior balances or late fees; use the current period utility charges total."
   ]
     .filter(Boolean)
     .join("\n");
@@ -400,9 +412,34 @@ async function extractEntriesFromPdf(file: File, timezone: string, utilityOverri
                     "evidence"
                   ]
                 }
+              },
+              bill_charges: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    utility_type: { type: "string" },
+                    bill_id: { type: ["string", "null"] },
+                    period_start: { type: ["string", "null"] },
+                    period_end: { type: ["string", "null"] },
+                    total_charges_cad: { type: "number" },
+                    confidence: { type: "number" },
+                    evidence: { type: "string" }
+                  },
+                  required: [
+                    "utility_type",
+                    "bill_id",
+                    "period_start",
+                    "period_end",
+                    "total_charges_cad",
+                    "confidence",
+                    "evidence"
+                  ]
+                }
               }
             },
-            required: ["entries"]
+            required: ["entries", "bill_charges"]
           }
         }
       },
@@ -434,12 +471,14 @@ async function extractEntriesFromPdf(file: File, timezone: string, utilityOverri
     throw new Error("Could not parse JSON extraction response.");
   }
 
-  const parsed = JSON.parse(text.slice(start, end + 1)) as { entries?: ExtractedEntry[] };
+  const parsed = JSON.parse(text.slice(start, end + 1)) as {
+    entries?: ExtractedEntry[];
+    bill_charges?: ExtractedBillCharge[];
+  };
   if (!Array.isArray(parsed.entries)) {
     throw new Error("Invalid extraction payload.");
   }
-
-  return parsed.entries
+  const entries = parsed.entries
     .map((entry) => ({
       ...entry,
       utility_type: (utilityOverride || entry.utility_type) as ExtractedEntry["utility_type"]
@@ -450,6 +489,20 @@ async function extractEntriesFromPdf(file: File, timezone: string, utilityOverri
         ALLOWED_ENTRY_TYPES.has(entry.entry_type) &&
         Number.isFinite(entry.reading_value)
     );
+
+  const billCharges = (Array.isArray(parsed.bill_charges) ? parsed.bill_charges : [])
+    .map((charge) => ({
+      ...charge,
+      utility_type: (utilityOverride || charge.utility_type) as ExtractedBillCharge["utility_type"]
+    }))
+    .filter(
+      (charge) =>
+        ALLOWED_UTILITY_TYPES.has(charge.utility_type) &&
+        Number.isFinite(charge.total_charges_cad) &&
+        charge.total_charges_cad >= 0
+    );
+
+  return { entries, billCharges };
 }
 
 async function extractMeterFromImage(file: File, timezone: string) {
@@ -615,6 +668,58 @@ async function insertEntry(unitId: string, entry: ExtractedEntry, imageRef: stri
       entry.bill_id,
       entry.is_opening
     ]
+  );
+}
+
+async function insertBillCharge(unitId: string, charge: ExtractedBillCharge, sourceRef: string) {
+  const evidence = `${sourceRef}: ${charge.evidence || ""}`.slice(0, 1000);
+  const commonParams = [
+    unitId,
+    charge.utility_type,
+    charge.bill_id,
+    charge.period_start,
+    charge.period_end,
+    charge.total_charges_cad,
+    Number.isFinite(charge.confidence) ? charge.confidence : 1,
+    evidence
+  ];
+
+  const updated = await dbQuery<{ id: string; utility_type: string; bill_id: string | null; period_start: string | null; period_end: string | null; total_charges_cad: string }>(
+    `update utility_bill_charge
+     set total_charges_cad = $6,
+         confidence = $7,
+         source = 'bill_pdf_ai',
+         raw_evidence = $8,
+         updated_at = now()
+     where unit_id = $1::uuid
+       and utility_type = $2
+       and coalesce(bill_id, '') = coalesce($3, '')
+       and coalesce(period_start, date '1900-01-01') = coalesce($4::date, date '1900-01-01')
+       and coalesce(period_end, date '1900-01-01') = coalesce($5::date, date '1900-01-01')
+     returning id::text, utility_type, bill_id, period_start::text, period_end::text, total_charges_cad::text`,
+    commonParams
+  );
+  if (updated.rows.length > 0) {
+    return updated;
+  }
+
+  return dbQuery<{
+    id: string;
+    utility_type: string;
+    bill_id: string | null;
+    period_start: string | null;
+    period_end: string | null;
+    total_charges_cad: string;
+  }>(
+    `insert into utility_bill_charge (
+      unit_id, utility_type, bill_id, period_start, period_end,
+      total_charges_cad, currency, confidence, source, raw_evidence, updated_at
+    ) values (
+      $1::uuid, $2, $3, $4::date, $5::date,
+      $6, 'CAD', $7, 'bill_pdf_ai', $8, now()
+    )
+    returning id::text, utility_type, bill_id, period_start::text, period_end::text, total_charges_cad::text`,
+    commonParams
   );
 }
 
@@ -1146,12 +1251,14 @@ export async function POST(request: NextRequest) {
       }
 
       const extracted = await extractEntriesFromPdf(file, timezone, utilityOverride);
-      if (extracted.length === 0) {
+      if (extracted.entries.length === 0 && extracted.billCharges.length === 0) {
         return NextResponse.json({ error: "No valid entries extracted from bill." }, { status: 422 });
       }
-      const deduped = dedupeRedundantBilledUsageEntries(extracted);
+      const deduped = dedupeRedundantBilledUsageEntries(extracted.entries);
       const entriesToInsert = deduped.entries;
-      const invalid = extracted.find((entry) => !isUtilityAllowedForUnit(unitName, entry.utility_type));
+      const invalid = [...entriesToInsert, ...extracted.billCharges].find(
+        (entry) => !isUtilityAllowedForUnit(unitName, entry.utility_type)
+      );
       if (invalid) {
         return NextResponse.json(
           {
@@ -1169,15 +1276,23 @@ export async function POST(request: NextRequest) {
         inserted.push(result.rows[0]);
       }
 
+      const insertedBillCharges = [];
+      for (let i = 0; i < extracted.billCharges.length; i += 1) {
+        const row = extracted.billCharges[i];
+        const result = await insertBillCharge(unitId, row, `upload:${file.name}:charge#${i + 1}`);
+        insertedBillCharges.push(result.rows[0]);
+      }
+
       await dbQuery("refresh materialized view energy_weather_report");
       const statsByUtility: Record<string, Awaited<ReturnType<typeof getUsageStats>>> = {};
-      for (const utilityType of Array.from(new Set(inserted.map((r) => r.utility_type)))) {
+      for (const utilityType of Array.from(new Set([...inserted.map((r) => r.utility_type), ...insertedBillCharges.map((r) => r.utility_type)]))) {
         statsByUtility[utilityType] = await getUsageStats(unitId, utilityType);
       }
 
       return NextResponse.json({
         mode: "bill",
         droppedDuplicateEntries: deduped.removed,
+        insertedBillCharges,
         insertedCount: inserted.length,
         inserted,
         statsByUtility
