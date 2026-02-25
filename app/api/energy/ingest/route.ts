@@ -61,12 +61,124 @@ type BillDeduplicationResult = {
   }>;
 };
 
+type UsageBucket = {
+  usageUnit: string;
+  usageValue: number;
+};
+
+type CostEstimate = {
+  totalCad: number;
+  fixedCad: number;
+  variableCad: number;
+  taxesAndLeviesCad: number;
+  days: number;
+  assumptions: string[];
+};
+
+// Estimated retail rates as of February 25, 2026 (BC).
+const BC_HYDRO_RATES = {
+  basicChargePerDay: 0.2330,
+  tier1KwhRate: 0.1172,
+  tier2KwhRate: 0.1408,
+  tier1KwhPerDayThreshold: 22.5,
+  gstRate: 0.05
+} as const;
+
+const FORTIS_GAS_RATES = {
+  basicChargePerDay: 0.4216,
+  deliveryPerGj: 8.469,
+  storageTransportPerGj: 2.255,
+  gasCommodityPerGj: 2.23,
+  cleanEnergyLevyRate: 0.004,
+  gstRate: 0.05,
+  estimatedGjPerM3: 0.1325
+} as const;
+
 function isUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function round3(value: number) {
   return Number(value.toFixed(3));
+}
+
+function roundMoney(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function toGasGj(usageValue: number, usageUnit: string) {
+  const normalized = String(usageUnit || "").toLowerCase();
+  if (normalized === "gj") {
+    return usageValue;
+  }
+  if (normalized === "m3" || normalized === "m^3" || normalized === "m³") {
+    return usageValue * FORTIS_GAS_RATES.estimatedGjPerM3;
+  }
+  return null;
+}
+
+function estimateElectricityCostCad(kwh: number, days: number): CostEstimate {
+  const fixedBase = BC_HYDRO_RATES.basicChargePerDay * days;
+  const tier1Cap = BC_HYDRO_RATES.tier1KwhPerDayThreshold * days;
+  const tier1Kwh = Math.min(Math.max(kwh, 0), tier1Cap);
+  const tier2Kwh = Math.max(kwh - tier1Kwh, 0);
+  const variableBase = tier1Kwh * BC_HYDRO_RATES.tier1KwhRate + tier2Kwh * BC_HYDRO_RATES.tier2KwhRate;
+  const subtotal = fixedBase + variableBase;
+  const gst = subtotal * BC_HYDRO_RATES.gstRate;
+  return {
+    totalCad: roundMoney(subtotal + gst),
+    fixedCad: roundMoney(fixedBase),
+    variableCad: roundMoney(variableBase),
+    taxesAndLeviesCad: roundMoney(gst),
+    days: round3(days),
+    assumptions: [
+      "BC Hydro RS 1101 tiered estimate with prorated Step 1 threshold",
+      "GST included (5%)",
+      "Excludes optional flat/time-of-day pricing and credits"
+    ]
+  };
+}
+
+function estimateGasCostCadFromGj(gj: number, days: number): CostEstimate {
+  const fixedBase = FORTIS_GAS_RATES.basicChargePerDay * days;
+  const variablePerGj =
+    FORTIS_GAS_RATES.deliveryPerGj + FORTIS_GAS_RATES.storageTransportPerGj + FORTIS_GAS_RATES.gasCommodityPerGj;
+  const variableBase = Math.max(gj, 0) * variablePerGj;
+  const subtotalBeforeLevy = fixedBase + variableBase;
+  const levy = subtotalBeforeLevy * FORTIS_GAS_RATES.cleanEnergyLevyRate;
+  const gst = (subtotalBeforeLevy + levy) * FORTIS_GAS_RATES.gstRate;
+  return {
+    totalCad: roundMoney(subtotalBeforeLevy + levy + gst),
+    fixedCad: roundMoney(fixedBase),
+    variableCad: roundMoney(variableBase),
+    taxesAndLeviesCad: roundMoney(levy + gst),
+    days: round3(days),
+    assumptions: [
+      "FortisBC mainland residential gas estimate",
+      `m3 converted to GJ using estimated factor ${FORTIS_GAS_RATES.estimatedGjPerM3} when required`,
+      "BC clean energy levy and GST included"
+    ]
+  };
+}
+
+function estimateCostForBuckets(utilityType: string, buckets: UsageBucket[], days: number): CostEstimate | null {
+  if (!Number.isFinite(days) || days <= 0) {
+    return null;
+  }
+  if (utilityType === "electricity") {
+    const totalKwh = buckets
+      .filter((bucket) => String(bucket.usageUnit).toLowerCase() === "kwh")
+      .reduce((sum, bucket) => sum + bucket.usageValue, 0);
+    return estimateElectricityCostCad(totalKwh, days);
+  }
+  if (utilityType === "gas") {
+    // Prefer billed GJ rows if present; otherwise convert meter m3 usage.
+    const gjBuckets = buckets.filter((bucket) => String(bucket.usageUnit).toLowerCase() === "gj");
+    const sourceBuckets = gjBuckets.length > 0 ? gjBuckets : buckets;
+    const totalGj = sourceBuckets.reduce((sum, bucket) => sum + (toGasGj(bucket.usageValue, bucket.usageUnit) ?? 0), 0);
+    return estimateGasCostCadFromGj(totalGj, days);
+  }
+  return null;
 }
 
 function nearlyEqual(a: number, b: number, absTolerance = 1, relativeTolerance = 0.02) {
@@ -524,6 +636,39 @@ async function getRecentMeterReads(unitId: string, utilityType: string, limit = 
   );
 }
 
+async function getUsageBucketsForWindow(unitId: string, utilityType: string, daysBackInclusive: number) {
+  const result = await dbQuery<{ usage_unit: string; usage_value: string }>(
+    `select usage_unit, coalesce(sum(consumption_delta), 0)::text as usage_value
+     from energy_weather_report
+     where unit_id = $1
+       and utility_type = $2
+       and day >= current_date - $3::int
+     group by usage_unit`,
+    [unitId, utilityType, daysBackInclusive]
+  );
+  return result.rows.map((row) => ({
+    usageUnit: row.usage_unit,
+    usageValue: Number(row.usage_value ?? 0)
+  }));
+}
+
+async function getUsageBucketsMonthToDate(unitId: string, utilityType: string) {
+  const result = await dbQuery<{ usage_unit: string; usage_value: string }>(
+    `select usage_unit, coalesce(sum(consumption_delta), 0)::text as usage_value
+     from energy_weather_report
+     where unit_id = $1
+       and utility_type = $2
+       and day >= date_trunc('month', current_date)::date
+       and day <= current_date
+     group by usage_unit`,
+    [unitId, utilityType]
+  );
+  return result.rows.map((row) => ({
+    usageUnit: row.usage_unit,
+    usageValue: Number(row.usage_value ?? 0)
+  }));
+}
+
 function buildMeterReadVariants(raw: number) {
   const variants = new Set<number>();
   if (Number.isFinite(raw)) {
@@ -658,7 +803,7 @@ async function getUsageStats(unitId: string, utilityType: string) {
        and coalesce(entry_type, 'meter_read') = 'meter_read'
        and parse_status = 'approved'
      order by captured_at desc
-     limit 2`,
+     limit 3`,
     [unitId, utilityType]
   );
 
@@ -695,6 +840,13 @@ async function getUsageStats(unitId: string, utilityType: string) {
     [unitId, utilityType]
   );
 
+  const [usage7Buckets, usage30Buckets, usage90Buckets, usageMonthToDateBuckets] = await Promise.all([
+    getUsageBucketsForWindow(unitId, utilityType, 7),
+    getUsageBucketsForWindow(unitId, utilityType, 30),
+    getUsageBucketsForWindow(unitId, utilityType, 90),
+    getUsageBucketsMonthToDate(unitId, utilityType)
+  ]);
+
   const lastBillEnd = await dbQuery<{ last_period_end: string | null }>(
     `select max(period_end)::text as last_period_end
      from meter_reading
@@ -706,6 +858,7 @@ async function getUsageStats(unitId: string, utilityType: string) {
   );
 
   let sinceLastBilling: { usage: number; unit: string; fromDate: string } | null = null;
+  let sinceLastBillingDays: number | null = null;
   const billEnd = lastBillEnd.rows[0]?.last_period_end;
   if (billEnd && meterReads.rows.length > 0) {
     const baseline = await dbQuery<{ reading_value: string; reading_unit: string }>(
@@ -728,6 +881,11 @@ async function getUsageStats(unitId: string, utilityType: string) {
         unit: latest.reading_unit,
         fromDate: billEnd
       };
+      sinceLastBillingDays = Math.max(
+        (new Date(latest.captured_at).getTime() - new Date(`${billEnd}T00:00:00-08:00`).getTime()) /
+          (1000 * 60 * 60 * 24),
+        1 / 24
+      );
     }
   }
 
@@ -773,6 +931,44 @@ async function getUsageStats(unitId: string, utilityType: string) {
       ? Number((((latestDelta.avgPerDay - previousInterval.avgPerDay) / previousInterval.avgPerDay) * 100).toFixed(1))
       : null;
 
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthToDateDays = Math.max(
+    (new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime() - monthStart.getTime()) / (1000 * 60 * 60 * 24),
+    1
+  );
+
+  const costEstimates = {
+    daily:
+      latestDelta
+        ? estimateCostForBuckets(utilityType, [{ usageUnit: latestDelta.unit, usageValue: latestDelta.avgPerDay }], 1)
+        : null,
+    monthToDate: estimateCostForBuckets(utilityType, usageMonthToDateBuckets, monthToDateDays),
+    last7d: estimateCostForBuckets(utilityType, usage7Buckets, 8),
+    last30d: estimateCostForBuckets(utilityType, usage30Buckets, 31),
+    last90d: estimateCostForBuckets(utilityType, usage90Buckets, 91),
+    latestInterval:
+      latestDelta
+        ? estimateCostForBuckets(utilityType, [{ usageUnit: latestDelta.unit, usageValue: latestDelta.usage }], latestDelta.days)
+        : null,
+    sinceLastBilling:
+      sinceLastBilling && sinceLastBillingDays
+        ? estimateCostForBuckets(
+            utilityType,
+            [{ usageUnit: sinceLastBilling.unit, usageValue: sinceLastBilling.usage }],
+            sinceLastBillingDays
+          )
+        : null,
+    projected30dFromLatestAvg:
+      projected30dFromLatestAvg
+        ? estimateCostForBuckets(
+            utilityType,
+            [{ usageUnit: projected30dFromLatestAvg.unit, usageValue: projected30dFromLatestAvg.usage }],
+            30
+          )
+        : null
+  };
+
   return {
     latestDelta,
     previousInterval,
@@ -784,7 +980,8 @@ async function getUsageStats(unitId: string, utilityType: string) {
     usage90dUnit: usage90.rows[0]?.usage_unit ?? null,
     projected30dFromLatestAvg,
     trendVsPreviousIntervalPct,
-    sinceLastBilling
+    sinceLastBilling,
+    costEstimates
   };
 }
 

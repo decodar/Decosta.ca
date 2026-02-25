@@ -30,8 +30,27 @@ type IngestResponse = {
       projected30dFromLatestAvg: { usage: number; unit: string } | null;
       trendVsPreviousIntervalPct: number | null;
       sinceLastBilling: { usage: number; unit: string; fromDate: string } | null;
+      costEstimates: {
+        daily: CostEstimate | null;
+        monthToDate: CostEstimate | null;
+        last7d: CostEstimate | null;
+        last30d: CostEstimate | null;
+        last90d: CostEstimate | null;
+        latestInterval: CostEstimate | null;
+        sinceLastBilling: CostEstimate | null;
+        projected30dFromLatestAvg: CostEstimate | null;
+      };
     }
   >;
+};
+
+type CostEstimate = {
+  totalCad: number;
+  fixedCad: number;
+  variableCad: number;
+  taxesAndLeviesCad: number;
+  days: number;
+  assumptions: string[];
 };
 
 type IngestErrorResponse = {
@@ -408,9 +427,39 @@ export default function EnergyIngestConsole() {
               <p>30-day usage: {stats.usage30d} {stats.usage30dUnit ?? ""}</p>
               <p>90-day usage: {stats.usage90d} {stats.usage90dUnit ?? ""}</p>
               <p>
+                Estimated daily cost:
+                {" "}
+                {stats.costEstimates.daily ? `$${stats.costEstimates.daily.totalCad}/day` : "not enough reads yet"}
+              </p>
+              <p>
+                Estimated month-to-date cost:
+                {" "}
+                {stats.costEstimates.monthToDate ? `$${stats.costEstimates.monthToDate.totalCad}` : "not enough data yet"}
+              </p>
+              <p>
+                Estimated 7-day cost:
+                {" "}
+                {stats.costEstimates.last7d ? `$${stats.costEstimates.last7d.totalCad}` : "not enough data yet"}
+              </p>
+              <p>
+                Estimated 30-day cost:
+                {" "}
+                {stats.costEstimates.last30d ? `$${stats.costEstimates.last30d.totalCad}` : "not enough data yet"}
+              </p>
+              <p>
+                Estimated 90-day cost:
+                {" "}
+                {stats.costEstimates.last90d ? `$${stats.costEstimates.last90d.totalCad}` : "not enough data yet"}
+              </p>
+              <p>
                 Latest interval:
                 {" "}
                 {stats.latestDelta ? `${stats.latestDelta.usage} ${stats.latestDelta.unit} over ${stats.latestDelta.days} day(s), avg ${stats.latestDelta.avgPerDay}/day` : "not enough reads yet"}
+              </p>
+              <p>
+                Latest interval estimated cost:
+                {" "}
+                {stats.costEstimates.latestInterval ? `$${stats.costEstimates.latestInterval.totalCad}` : "not enough reads yet"}
               </p>
               <p>
                 Previous interval:
@@ -428,10 +477,25 @@ export default function EnergyIngestConsole() {
                 {stats.projected30dFromLatestAvg ? `${stats.projected30dFromLatestAvg.usage} ${stats.projected30dFromLatestAvg.unit}` : "not enough reads yet"}
               </p>
               <p>
+                Projected 30-day cost (latest avg):
+                {" "}
+                {stats.costEstimates.projected30dFromLatestAvg ? `$${stats.costEstimates.projected30dFromLatestAvg.totalCad}` : "not enough reads yet"}
+              </p>
+              <p>
                 Since last billed period:
                 {" "}
                 {stats.sinceLastBilling ? `${stats.sinceLastBilling.usage} ${stats.sinceLastBilling.unit} since ${stats.sinceLastBilling.fromDate}` : "no billed period baseline yet"}
               </p>
+              <p>
+                Since last billed period estimated cost:
+                {" "}
+                {stats.costEstimates.sinceLastBilling ? `$${stats.costEstimates.sinceLastBilling.totalCad}` : "no billed period baseline yet"}
+              </p>
+              {stats.costEstimates.monthToDate && (
+                <p className="muted" style={{ marginTop: ".25rem" }}>
+                  Cost estimate breakdown (MTD): fixed ${stats.costEstimates.monthToDate.fixedCad}, variable ${stats.costEstimates.monthToDate.variableCad}, taxes/levies ${stats.costEstimates.monthToDate.taxesAndLeviesCad}
+                </p>
+              )}
             </div>
           ))}
         </section>
