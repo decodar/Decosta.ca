@@ -50,12 +50,29 @@ type MeterImageNormalizationResult = {
   flagged: boolean;
 };
 
+type BillDeduplicationResult = {
+  entries: ExtractedEntry[];
+  removed: Array<{
+    bill_id: string | null;
+    utility_type: string;
+    reading_unit: string;
+    reading_value: number;
+    reason: string;
+  }>;
+};
+
 function isUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function round3(value: number) {
   return Number(value.toFixed(3));
+}
+
+function nearlyEqual(a: number, b: number, absTolerance = 1, relativeTolerance = 0.02) {
+  const diff = Math.abs(a - b);
+  const scale = Math.max(Math.abs(a), Math.abs(b), 1);
+  return diff <= Math.max(absTolerance, scale * relativeTolerance);
 }
 
 function getMaxReasonableDailyUsage(utilityType: string) {
@@ -147,6 +164,61 @@ function chooseMappedMeterIdentifier(extracted: ExtractedMeterImage) {
     }
   }
   return { identifier: normalizeMeterIdentifier(extracted.meter_identifier), mapping: null, tried: prioritized };
+}
+
+function dedupeRedundantBilledUsageEntries(entries: ExtractedEntry[]): BillDeduplicationResult {
+  if (entries.length <= 1) {
+    return { entries, removed: [] };
+  }
+
+  const meterReads = entries.filter((entry) => entry.entry_type === "meter_read");
+  const billedUsage = entries.filter((entry) => entry.entry_type === "billed_usage");
+  const passThrough = entries.filter((entry) => entry.entry_type !== "meter_read" && entry.entry_type !== "billed_usage");
+
+  const removed: BillDeduplicationResult["removed"] = [];
+  const keptBilledUsage: ExtractedEntry[] = [];
+
+  for (const billed of billedUsage) {
+    // Only dedupe when billed usage is in the same unit as meter reads (e.g., electricity kWh).
+    // Gas bills often have meter reads in m3 and billed usage in GJ, which should both be kept.
+    const candidates = meterReads.filter(
+      (read) =>
+        read.utility_type === billed.utility_type &&
+        String(read.reading_unit || "").toLowerCase() === String(billed.reading_unit || "").toLowerCase() &&
+        (read.bill_id || null) === (billed.bill_id || null)
+    );
+
+    if (candidates.length >= 2) {
+      const sorted = [...candidates].sort(
+        (a, b) => new Date(a.captured_at).getTime() - new Date(b.captured_at).getTime()
+      );
+      const opening = sorted[0];
+      const closing = sorted[sorted.length - 1];
+      const meterDelta = closing.reading_value - opening.reading_value;
+
+      if (
+        Number.isFinite(meterDelta) &&
+        meterDelta >= 0 &&
+        nearlyEqual(billed.reading_value, meterDelta)
+      ) {
+        removed.push({
+          bill_id: billed.bill_id,
+          utility_type: billed.utility_type,
+          reading_unit: billed.reading_unit,
+          reading_value: billed.reading_value,
+          reason: `Matches meter delta (${round3(closing.reading_value)} - ${round3(opening.reading_value)} = ${round3(meterDelta)})`
+        });
+        continue;
+      }
+    }
+
+    keptBilledUsage.push(billed);
+  }
+
+  // Preserve original ordering for kept entries.
+  const keptSet = new Set<ExtractedEntry>([...meterReads, ...keptBilledUsage, ...passThrough]);
+  const filtered = entries.filter((entry) => keptSet.has(entry));
+  return { entries: filtered, removed };
 }
 
 async function extractEntriesFromPdf(file: File, timezone: string, utilityOverride?: string | null) {
@@ -824,6 +896,8 @@ export async function POST(request: NextRequest) {
       if (extracted.length === 0) {
         return NextResponse.json({ error: "No valid entries extracted from bill." }, { status: 422 });
       }
+      const deduped = dedupeRedundantBilledUsageEntries(extracted);
+      const entriesToInsert = deduped.entries;
       const invalid = extracted.find((entry) => !isUtilityAllowedForUnit(unitName, entry.utility_type));
       if (invalid) {
         return NextResponse.json(
@@ -836,8 +910,8 @@ export async function POST(request: NextRequest) {
       }
 
       const inserted = [];
-      for (let i = 0; i < extracted.length; i += 1) {
-        const row = extracted[i];
+      for (let i = 0; i < entriesToInsert.length; i += 1) {
+        const row = entriesToInsert[i];
         const result = await insertEntry(unitId, row, `upload:${file.name}#${i + 1}`);
         inserted.push(result.rows[0]);
       }
@@ -850,6 +924,7 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json({
         mode: "bill",
+        droppedDuplicateEntries: deduped.removed,
         insertedCount: inserted.length,
         inserted,
         statsByUtility
