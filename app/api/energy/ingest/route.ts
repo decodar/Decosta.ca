@@ -36,6 +36,7 @@ type ExtractedEntry = {
 
 type ExtractedMeterImage = {
   meter_identifier: string;
+  meter_identifier_candidates: string[];
   reading_value: number;
   reading_unit: string | null;
   captured_at: string | null;
@@ -98,6 +99,54 @@ function getOutputText(payload: unknown) {
     .flatMap((item) => (Array.isArray(item.content) ? item.content : []))
     .map((part) => part.text || part.output_text || "")
     .join("\n");
+}
+
+function uniqueNormalizedMeterIdCandidates(values: Array<string | null | undefined>) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    const normalized = normalizeMeterIdentifier(value);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function extractDigitSequences(text: string | null | undefined) {
+  if (!text) {
+    return [];
+  }
+  const matches = text.match(/\d[\d\s-]{4,}\d/g) || [];
+  return matches.map((m) => normalizeMeterIdentifier(m)).filter(Boolean);
+}
+
+function chooseMappedMeterIdentifier(extracted: ExtractedMeterImage) {
+  const candidates = uniqueNormalizedMeterIdCandidates([
+    extracted.meter_identifier,
+    ...(Array.isArray(extracted.meter_identifier_candidates) ? extracted.meter_identifier_candidates : []),
+    ...extractDigitSequences(extracted.evidence)
+  ]);
+
+  // Prefer the known BC Hydro meter-id format first.
+  const prioritized = [...candidates].sort((a, b) => {
+    const aScore = Number(/^345\d{6}$/.test(a)) * 10 + Number(a.length === 9);
+    const bScore = Number(/^345\d{6}$/.test(b)) * 10 + Number(b.length === 9);
+    return bScore - aScore;
+  });
+
+  for (const candidate of prioritized) {
+    const mapping = lookupMeterIdentifier(candidate);
+    if (mapping) {
+      return { identifier: candidate, mapping, tried: prioritized };
+    }
+  }
+  return { identifier: normalizeMeterIdentifier(extracted.meter_identifier), mapping: null, tried: prioritized };
 }
 
 async function extractEntriesFromPdf(file: File, timezone: string, utilityOverride?: string | null) {
@@ -279,13 +328,25 @@ async function extractMeterFromImage(file: File, timezone: string) {
             additionalProperties: false,
             properties: {
               meter_identifier: { type: "string" },
+              meter_identifier_candidates: {
+                type: "array",
+                items: { type: "string" }
+              },
               reading_value: { type: "number" },
               reading_unit: { type: ["string", "null"] },
               captured_at: { type: ["string", "null"] },
               confidence: { type: "number" },
               evidence: { type: "string" }
             },
-            required: ["meter_identifier", "reading_value", "reading_unit", "captured_at", "confidence", "evidence"]
+            required: [
+              "meter_identifier",
+              "meter_identifier_candidates",
+              "reading_value",
+              "reading_unit",
+              "captured_at",
+              "confidence",
+              "evidence"
+            ]
           }
         }
       },
@@ -297,7 +358,10 @@ async function extractMeterFromImage(file: File, timezone: string) {
               type: "input_text",
               text:
                 `Read this utility meter photo and return STRICT JSON only.\n` +
-                `Extract the meter identifier and the cumulative reading value shown.\n` +
+                `Extract the true utility meter identifier (serial/meter number) and the cumulative reading value shown.\n` +
+                `Do NOT return model numbers, part numbers, form numbers, or manufacturer codes as meter_identifier.\n` +
+                `The true electricity meter identifier for this site is a 9-digit number and often starts with '345'.\n` +
+                `Return meter_identifier_candidates as all plausible identifier-like numbers visible on the meter face (excluding the kWh reading display).\n` +
                 `If the image shows kWh, return reading_unit='kWh'. If unclear, return null.\n` +
                 `If no timestamp/date is visible, return captured_at=null.\n` +
                 `Use timezone ${timezone} if a date/time is visible.\n` +
@@ -327,6 +391,9 @@ async function extractMeterFromImage(file: File, timezone: string) {
   const parsed = JSON.parse(text.slice(start, end + 1)) as ExtractedMeterImage;
   if (!parsed.meter_identifier || !Number.isFinite(parsed.reading_value)) {
     throw new Error("Meter image extraction missing identifier or reading.");
+  }
+  if (!Array.isArray(parsed.meter_identifier_candidates)) {
+    parsed.meter_identifier_candidates = [];
   }
   return parsed;
 }
@@ -640,7 +707,8 @@ export async function POST(request: NextRequest) {
       }
       if (mode === "meter_image") {
         const extracted = await extractMeterFromImage(file, timezone);
-        let mapping = lookupMeterIdentifier(extracted.meter_identifier);
+        const resolvedMeter = chooseMappedMeterIdentifier(extracted);
+        let mapping = resolvedMeter.mapping;
         let mappedBy = "identifier";
 
         if (manualUnitOverride) {
@@ -664,6 +732,8 @@ export async function POST(request: NextRequest) {
               {
                 error: `Unknown meter identifier '${normalizeMeterIdentifier(extracted.meter_identifier)}'. Add a mapping before ingest or use manual unit override.`,
                 extracted
+                ,
+                identifierCandidatesTried: resolvedMeter.tried
               },
               { status: 422 }
             );
@@ -682,6 +752,9 @@ export async function POST(request: NextRequest) {
             );
           }
           unitId = mappedUnitId;
+          if (resolvedMeter.identifier && resolvedMeter.identifier !== normalizeMeterIdentifier(extracted.meter_identifier)) {
+            mappedBy = "candidate_identifier_match";
+          }
         }
 
         const entry: ExtractedEntry = {
@@ -720,6 +793,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({
           mode: "meter",
           meterIdentifier: extracted.meter_identifier,
+          resolvedMeterIdentifier: resolvedMeter.identifier,
           mappedBy,
           mappedMeter: mapping,
           correctionNote: normalization.correctionNote,
