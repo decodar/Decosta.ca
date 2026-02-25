@@ -673,6 +673,28 @@ async function getUsageStats(unitId: string, utilityType: string) {
     [unitId, utilityType]
   );
 
+  const usage7 = await dbQuery<{ usage_7d: string | null; usage_unit: string | null }>(
+    `select
+      coalesce(sum(consumption_delta), 0)::text as usage_7d,
+      max(usage_unit) as usage_unit
+     from energy_weather_report
+     where unit_id = $1
+       and utility_type = $2
+       and day >= current_date - 7`,
+    [unitId, utilityType]
+  );
+
+  const usage90 = await dbQuery<{ usage_90d: string | null; usage_unit: string | null }>(
+    `select
+      coalesce(sum(consumption_delta), 0)::text as usage_90d,
+      max(usage_unit) as usage_unit
+     from energy_weather_report
+     where unit_id = $1
+       and utility_type = $2
+       and day >= current_date - 90`,
+    [unitId, utilityType]
+  );
+
   const lastBillEnd = await dbQuery<{ last_period_end: string | null }>(
     `select max(period_end)::text as last_period_end
      from meter_reading
@@ -710,6 +732,7 @@ async function getUsageStats(unitId: string, utilityType: string) {
   }
 
   let latestDelta: { usage: number; days: number; avgPerDay: number; unit: string } | null = null;
+  let previousInterval: { usage: number; days: number; avgPerDay: number; unit: string } | null = null;
   if (meterReads.rows.length >= 2) {
     const latest = meterReads.rows[0];
     const prev = meterReads.rows[1];
@@ -723,11 +746,44 @@ async function getUsageStats(unitId: string, utilityType: string) {
       unit: latest.reading_unit
     };
   }
+  if (meterReads.rows.length >= 3) {
+    const prev = meterReads.rows[1];
+    const older = meterReads.rows[2];
+    const usage = Number(prev.reading_value) - Number(older.reading_value);
+    const ms = new Date(prev.captured_at).getTime() - new Date(older.captured_at).getTime();
+    const days = Math.max(ms / (1000 * 60 * 60 * 24), 1 / 24);
+    previousInterval = {
+      usage,
+      days: Number(days.toFixed(3)),
+      avgPerDay: Number((usage / days).toFixed(3)),
+      unit: prev.reading_unit
+    };
+  }
+
+  const projected30dFromLatestAvg =
+    latestDelta && Number.isFinite(latestDelta.avgPerDay)
+      ? {
+          usage: Number((latestDelta.avgPerDay * 30).toFixed(3)),
+          unit: latestDelta.unit
+        }
+      : null;
+
+  const trendVsPreviousIntervalPct =
+    latestDelta && previousInterval && previousInterval.avgPerDay > 0
+      ? Number((((latestDelta.avgPerDay - previousInterval.avgPerDay) / previousInterval.avgPerDay) * 100).toFixed(1))
+      : null;
 
   return {
     latestDelta,
+    previousInterval,
     usage30d: Number(usage30.rows[0]?.usage_30d ?? 0),
     usage30dUnit: usage30.rows[0]?.usage_unit ?? null,
+    usage7d: Number(usage7.rows[0]?.usage_7d ?? 0),
+    usage7dUnit: usage7.rows[0]?.usage_unit ?? null,
+    usage90d: Number(usage90.rows[0]?.usage_90d ?? 0),
+    usage90dUnit: usage90.rows[0]?.usage_unit ?? null,
+    projected30dFromLatestAvg,
+    trendVsPreviousIntervalPct,
     sinceLastBilling
   };
 }

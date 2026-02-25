@@ -20,8 +20,15 @@ type IngestResponse = {
     string,
     {
       latestDelta: { usage: number; days: number; avgPerDay: number; unit: string } | null;
+      previousInterval: { usage: number; days: number; avgPerDay: number; unit: string } | null;
       usage30d: number;
       usage30dUnit: string | null;
+      usage7d: number;
+      usage7dUnit: string | null;
+      usage90d: number;
+      usage90dUnit: string | null;
+      projected30dFromLatestAvg: { usage: number; unit: string } | null;
+      trendVsPreviousIntervalPct: number | null;
       sinceLastBilling: { usage: number; unit: string; fromDate: string } | null;
     }
   >;
@@ -397,11 +404,28 @@ export default function EnergyIngestConsole() {
               <p>
                 <strong>{utility}</strong>
               </p>
+              <p>7-day usage: {stats.usage7d} {stats.usage7dUnit ?? ""}</p>
               <p>30-day usage: {stats.usage30d} {stats.usage30dUnit ?? ""}</p>
+              <p>90-day usage: {stats.usage90d} {stats.usage90dUnit ?? ""}</p>
               <p>
                 Latest interval:
                 {" "}
                 {stats.latestDelta ? `${stats.latestDelta.usage} ${stats.latestDelta.unit} over ${stats.latestDelta.days} day(s), avg ${stats.latestDelta.avgPerDay}/day` : "not enough reads yet"}
+              </p>
+              <p>
+                Previous interval:
+                {" "}
+                {stats.previousInterval ? `${stats.previousInterval.usage} ${stats.previousInterval.unit} over ${stats.previousInterval.days} day(s), avg ${stats.previousInterval.avgPerDay}/day` : "not enough reads yet"}
+              </p>
+              <p>
+                Trend vs previous interval:
+                {" "}
+                {stats.trendVsPreviousIntervalPct !== null ? `${stats.trendVsPreviousIntervalPct > 0 ? "+" : ""}${stats.trendVsPreviousIntervalPct}%` : "not enough reads yet"}
+              </p>
+              <p>
+                Projected 30-day usage (latest avg):
+                {" "}
+                {stats.projected30dFromLatestAvg ? `${stats.projected30dFromLatestAvg.usage} ${stats.projected30dFromLatestAvg.unit}` : "not enough reads yet"}
               </p>
               <p>
                 Since last billed period:
