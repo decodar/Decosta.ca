@@ -18,7 +18,7 @@ const METER_IDENTIFIER_MAP: Record<string, MeterIdentifierMapping> = {
     readingUnitDefault: "kWh",
     label: "Coach electricity meter"
   },
-  "345819731": {
+  "348819731": {
     unitName: "Suite",
     utilityType: "electricity",
     readingUnitDefault: "kWh",
